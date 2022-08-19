@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"sync/atomic"
 
+	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -68,8 +69,9 @@ type server struct {
 // So if the client requests a new name we can respond back
 // regardless current snapshot version (even if it is not changed yet)
 type lastDiscoveryResponse struct {
-	nonce     string
-	resources map[string]struct{}
+	versionInfo string
+	nonce       string
+	resources   map[string]struct{}
 }
 
 // process handles a bi-di stream request
@@ -113,8 +115,9 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 		out.Nonce = strconv.FormatInt(streamNonce, 10)
 
 		lastResponse := lastDiscoveryResponse{
-			nonce:     out.Nonce,
-			resources: make(map[string]struct{}),
+			versionInfo: out.VersionInfo,
+			nonce:       out.Nonce,
+			resources:   make(map[string]struct{}),
 		}
 		for _, r := range resp.GetRequest().ResourceNames {
 			lastResponse.resources[r] = struct{}{}
@@ -184,10 +187,19 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 			}
 
 			if lastResponse, ok := lastDiscoveryResponses[req.TypeUrl]; ok {
-				if lastResponse.nonce == "" || lastResponse.nonce == nonce {
+				// Based on https://www.envoyproxy.io/docs/envoy/latest/api-docs/xds_protocol, we should detect
+				// only using ErrorDetail. But old code may don't have ErrorDetail in NACK.
+				if req.VersionInfo != "" && req.ErrorDetail == nil && (req.VersionInfo != lastResponse.versionInfo || req.ResponseNonce != lastResponse.nonce) {
+					// TODO: Remove this trick
+					req.ErrorDetail = &rpcstatus.Status{}
+				}
+				if req.ErrorDetail == nil && (lastResponse.nonce == "" || lastResponse.nonce == nonce) {
 					// Let's record Resource names that a client has received.
 					streamState.SetKnownResourceNames(req.TypeUrl, lastResponse.resources)
 				}
+			}
+			if req.ErrorDetail == nil && req.VersionInfo == "" {
+				streamState.SetKnownResourceNames(req.TypeUrl, make(map[string]struct{}))
 			}
 
 			typeURL := req.GetTypeUrl()

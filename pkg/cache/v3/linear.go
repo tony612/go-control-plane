@@ -335,13 +335,24 @@ func (cache *LinearCache) CreateWatch(request *Request, streamState stream.Strea
 			}
 		}
 	}
+	// For NACK, we don't respond but wait for new resources
 	if stale {
-		cache.respond(value, staleResources)
-		return nil
+		if request.ErrorDetail == nil {
+			cache.log.Infof("[linear cache] will send response for stale resources: %v", staleResources)
+			cache.respond(value, staleResources)
+			return nil
+		}
+		if cache.log != nil {
+			cache.log.Infof("[linear cache] resources is stale but do not respond because NACK")
+		}
 	}
 	// Create open watches since versions are up to date.
 	if len(request.ResourceNames) == 0 {
 		cache.watchAll[value] = struct{}{}
+		if cache.log != nil {
+			cache.log.Infof("[linear cache] open watch for all %s resources, system version %q",
+				cache.typeURL, cache.getVersion())
+		}
 		return func() {
 			cache.mu.Lock()
 			defer cache.mu.Unlock()
@@ -355,6 +366,10 @@ func (cache *LinearCache) CreateWatch(request *Request, streamState stream.Strea
 			cache.watches[name] = set
 		}
 		set[value] = struct{}{}
+	}
+	if cache.log != nil {
+		cache.log.Infof("[linear cache] open watch for %s Resources:%v, system version %q",
+			cache.typeURL, request.ResourceNames, cache.getVersion())
 	}
 	return func() {
 		cache.mu.Lock()
