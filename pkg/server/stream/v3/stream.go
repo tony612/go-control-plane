@@ -21,6 +21,24 @@ type DeltaStream interface {
 	Recv() (*discovery.DeltaDiscoveryRequest, error)
 }
 
+type SotwSubscribed struct {
+	wildcard                bool
+	subscribedResourceNames map[string]struct{}
+}
+
+func (s *SotwSubscribed) setNames(names []string) {
+	for _, v := range names {
+		if v == "*" {
+			s.wildcard = true
+			// don't need to track it explicitly
+			s.subscribedResourceNames = make(map[string]struct{})
+			break
+		} else {
+			s.subscribedResourceNames[v] = struct{}{}
+		}
+	}
+}
+
 // StreamState will keep track of resource state per type on a stream.
 type StreamState struct { // nolint:golint,revive
 	// Indicates whether the delta stream currently has a wildcard watch
@@ -29,6 +47,9 @@ type StreamState struct { // nolint:golint,revive
 	// Provides the list of resources explicitly requested by the client
 	// This list might be non-empty even when set as wildcard
 	subscribedResourceNames map[string]struct{}
+
+	// type url to state
+	subscriedSotwResources map[string]*SotwSubscribed
 
 	// ResourceVersions contains a hash of the resource as the value and the resource name as the key.
 	// This field stores the last state sent to the client.
@@ -67,6 +88,74 @@ func (s *StreamState) WatchesResources(resourceNames map[string]struct{}) bool {
 		if _, ok := s.subscribedResourceNames[resourceName]; ok {
 			return true
 		}
+	}
+	return false
+}
+
+// SetSubscribedSotwResources is setting the list of resources currently explicitly subscribed to
+func (s *StreamState) SetSubscribedSotwResources(url string, names []string) {
+	if _, found := s.subscriedSotwResources[url]; found {
+		newResources := &SotwSubscribed{
+			subscribedResourceNames: make(map[string]struct{}),
+		}
+		newResources.setNames(names)
+		s.subscriedSotwResources[url] = newResources
+	} else {
+		// At first, when names are unset, it's *.
+		// Here wew use not found to present not setting, which means *.
+		// Notice, LDS, CDS are always empty, and we need to keep this if all requests are unset until it's set.
+		// https://www.envoyproxy.io/docs/envoy/v1.24.0/api-docs/xds_protocol#how-the-client-specifies-what-resources-to-return
+		if len(names) == 0 {
+			return
+		}
+		newResources := &SotwSubscribed{
+			subscribedResourceNames: make(map[string]struct{}),
+		}
+		newResources.setNames(names)
+		s.subscriedSotwResources[url] = newResources
+	}
+}
+
+// WatchesSotwAll returns whether currently watch all resources. If not, request.ResourceNames are watching resources.
+func (s *StreamState) WatchesSotwAll(url string) bool {
+	resources, found := s.subscriedSotwResources[url]
+	// We don't set it when it's always unset. See SetSubscribedSotwResources
+	if !found {
+		return true
+	}
+	if resources.wildcard {
+		return true
+	}
+	return false
+}
+
+// WatchesSotwAll returns whether newly watch all resources. If not, request.ResourceNames are watching resources.
+func (s *StreamState) WatchesSotwAllNew(url string, names []string) bool {
+	if _, found := s.subscriedSotwResources[url]; !found {
+		// Here wew use not found to present not setting, which means *.
+		if len(names) == 0 {
+			return true
+		}
+	}
+	newResources := &SotwSubscribed{
+		subscribedResourceNames: make(map[string]struct{}),
+	}
+	newResources.setNames(names)
+	return newResources.wildcard
+}
+
+// WatchesSotwAll returns whether newly watch all resources. If not, request.ResourceNames are watching resources.
+func (s *StreamState) WatchesSotwResource(url string, name string) bool {
+	resources, found := s.subscriedSotwResources[url]
+	if !found {
+		// We don't set it when it's always unset. See SetSubscribedSotwResources
+		return true
+	}
+	if resources.wildcard {
+		return true
+	}
+	if _, ok := resources.subscribedResourceNames[name]; ok {
+		return true
 	}
 	return false
 }
@@ -113,6 +202,7 @@ func NewStreamState(wildcard bool, initialResourceVersions map[string]string) St
 	state := StreamState{
 		wildcard:                wildcard,
 		subscribedResourceNames: map[string]struct{}{},
+		subscriedSotwResources:  map[string]*SotwSubscribed{},
 		resourceVersions:        initialResourceVersions,
 		first:                   true,
 		knownResourceNames:      map[string]map[string]struct{}{},

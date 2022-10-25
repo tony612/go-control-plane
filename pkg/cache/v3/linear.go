@@ -113,10 +113,10 @@ func NewLinearCache(typeURL string, opts ...LinearCacheOption) *LinearCache {
 	return out
 }
 
-func (cache *LinearCache) respond(value chan Response, staleResources []string) {
+func (cache *LinearCache) respond(value chan Response, staleResources []string, watchAll bool) {
 	var resources []types.ResourceWithTTL
 	// TODO: optimize the resources slice creations across different clients
-	if len(staleResources) == 0 {
+	if watchAll {
 		resources = make([]types.ResourceWithTTL, 0, len(cache.resources))
 		for _, resource := range cache.resources {
 			resources = append(resources, types.ResourceWithTTL{Resource: resource})
@@ -148,10 +148,10 @@ func (cache *LinearCache) notifyAll(modified map[string]struct{}) {
 		delete(cache.watches, name)
 	}
 	for value, stale := range notifyList {
-		cache.respond(value, stale)
+		cache.respond(value, stale, false)
 	}
 	for value := range cache.watchAll {
-		cache.respond(value, nil)
+		cache.respond(value, nil, true)
 	}
 	cache.watchAll = make(watches)
 
@@ -307,7 +307,10 @@ func (cache *LinearCache) CreateWatch(request *Request, streamState stream.Strea
 	// been updated between the last version and the current version. This avoids the problem
 	// of sending empty updates whenever an irrelevant resource changes.
 	stale := false
-	staleResources := []string{} // empty means all
+	staleResources := []string{}
+	// Previous watchAll
+	oldWatchAll := streamState.WatchesSotwAll(cache.typeURL)
+	newWatchAll := streamState.WatchesSotwAllNew(cache.typeURL, request.ResourceNames)
 
 	// strip version prefix if it is present
 	var lastVersion uint64
@@ -324,12 +327,17 @@ func (cache *LinearCache) CreateWatch(request *Request, streamState stream.Strea
 	if err != nil {
 		stale = true
 		staleResources = request.ResourceNames
-	} else if len(request.ResourceNames) == 0 {
+	} else if oldWatchAll && newWatchAll {
 		stale = lastVersion != cache.version
+	} else if !oldWatchAll && newWatchAll {
+		stale = true
 	} else {
+		// When new watched resources are not all
 		for _, name := range request.ResourceNames {
-			// When a resource is removed, its version defaults 0 and it is not considered stale.
-			if lastVersion < cache.versionVector[name] {
+			// Not watched before, now watch.
+			// OR
+			// Watch before and watch now. Version changes. When a resource is removed, its version defaults 0 and it is not considered stale.
+			if !streamState.WatchesSotwResource(cache.typeURL, name) || lastVersion < cache.versionVector[name] {
 				stale = true
 				staleResources = append(staleResources, name)
 			}
@@ -338,8 +346,10 @@ func (cache *LinearCache) CreateWatch(request *Request, streamState stream.Strea
 	// For NACK, we don't respond but wait for new resources
 	if stale {
 		if request.ErrorDetail == nil {
-			cache.log.Infof("[linear cache] will send response for stale resources: %v", staleResources)
-			cache.respond(value, staleResources)
+			if cache.log != nil {
+				cache.log.Infof("[linear cache] will send response for stale resources: %v", staleResources)
+			}
+			cache.respond(value, staleResources, newWatchAll)
 			return nil
 		}
 		if cache.log != nil {
@@ -347,7 +357,7 @@ func (cache *LinearCache) CreateWatch(request *Request, streamState stream.Strea
 		}
 	}
 	// Create open watches since versions are up to date.
-	if len(request.ResourceNames) == 0 {
+	if newWatchAll {
 		cache.watchAll[value] = struct{}{}
 		if cache.log != nil {
 			cache.log.Infof("[linear cache] open watch for all %s resources, system version %q",

@@ -224,6 +224,10 @@ func (s *server) process(str stream.Stream, reqCh <-chan *discovery.DiscoveryReq
 				})
 			}
 
+			if req.ErrorDetail == nil {
+				streamState.SetSubscribedSotwResources(req.TypeUrl, req.ResourceNames)
+			}
+
 			// Recompute the dynamic select cases for this stream.
 			watches.recompute(s.ctx, reqCh)
 		default:
